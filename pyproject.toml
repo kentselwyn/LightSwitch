@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lightswitch"
-version = "0.1.0"
-description = "Framework-agnostic AI model loading and VRAM management utilities."
+version = "0.2.0"
+description = "Framework-agnostic AI model loading and memory management utilities."
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [
@@ -17,7 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Topic :: Software Development :: Libraries",
 ]
-dependencies = []
+dependencies = ["psutil>=5.9"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -25,4 +25,3 @@ dev = ["pytest>=8"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-
