@@ -132,7 +132,7 @@ def test_infer_recovers_evicted_model_through_cpu_and_gpu():
     assert manager.vram_available == 14
 
 
-def test_conservative_recovery_offloads_before_loading_by_default():
+def test_conservative_recovery_fully_evicts_before_loading_by_default():
     call_order = []
 
     class OrderedModel(FakeModel):
@@ -150,10 +150,12 @@ def test_conservative_recovery_offloads_before_loading_by_default():
 
     assert call_order == [
         "old:move_to_cpu",
+        "old:evict_from_cpu",
         "target:load_to_cpu",
         "target:move_to_gpu",
         "target:infer",
     ]
+    assert old.state is ModelState.EVICTED
 
 
 def test_non_conservative_recovery_preserves_load_first_order():
@@ -196,6 +198,23 @@ def test_conservative_recovery_does_not_load_if_offload_fails():
     assert target.calls == []
 
 
+def test_conservative_recovery_does_not_load_if_eviction_fails():
+    manager = make_manager(vram=0)
+    old = FakeModel("old", vram=5)
+    target = FakeModel("target", vram=5)
+    old.mark_gpu_resident()
+    old.fail_on = "evict_from_cpu"
+    register(manager, old, target)
+
+    with pytest.raises(ModelTransitionError, match="adapter failure"):
+        manager.infer("target")
+
+    assert old.state is ModelState.CPU_RESIDENT
+    assert old.calls == ["move_to_cpu", "evict_from_cpu"]
+    assert target.state is ModelState.EVICTED
+    assert target.calls == []
+
+
 def test_infer_reuses_gpu_resident_model():
     manager = make_manager()
     model = FakeModel("a")
@@ -214,6 +233,7 @@ def test_vram_capacity_offloads_least_recently_used_model():
     for model, last_used in ((old, 1.0), (newer, 2.0)):
         model.mark_gpu_resident()
         model.last_used_at = last_used
+    target.mark_cpu_resident()
     register(manager, old, newer, target)
 
     manager.infer("target")

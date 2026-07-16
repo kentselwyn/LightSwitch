@@ -236,6 +236,20 @@ class MemoryManager:
     ) -> None:
         """Ensure a new allocation can coexist with the configured VRAM reserve."""
 
+        self._ensure_vram_available(
+            required_bytes,
+            keep_resident=keep_resident,
+            evict_offloaded=False,
+        )
+
+    def _ensure_vram_available(
+        self,
+        required_bytes: int,
+        keep_resident: Optional[str],
+        evict_offloaded: bool,
+    ) -> None:
+        """Ensure VRAM capacity, optionally evicting every offloaded model."""
+
         if required_bytes < 0:
             raise ValueError("required_bytes must be non-negative")
         target_available = self.vram_reserve_bytes + required_bytes
@@ -247,7 +261,10 @@ class MemoryManager:
 
             for model in self._vram_candidates(keep_resident):
                 self._move_to_cpu(model)
-                if self.ram_info().available_bytes < self.ram_reserve_bytes:
+                if (
+                    evict_offloaded
+                    or self.ram_info().available_bytes < self.ram_reserve_bytes
+                ):
                     self._evict(model)
                 available = self.vram_info().available_bytes
                 if available >= target_available:
@@ -267,8 +284,10 @@ class MemoryManager:
                 model = self.get(name)
                 if model.state is ModelState.EVICTED:
                     if self.conservative:
-                        self.ensure_vram_available(
-                            model.estimated_vram_bytes, keep_resident=name
+                        self._ensure_vram_available(
+                            model.estimated_vram_bytes,
+                            keep_resident=name,
+                            evict_offloaded=True,
                         )
                     self.ensure_ram_available(
                         model.estimated_ram_bytes, keep_resident=name

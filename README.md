@@ -82,9 +82,10 @@ models in LRU order. VRAM-only pressure leaves them CPU-resident for faster
 recovery. Models currently running inference are never transitioned.
 
 `conservative=True` is the default. When an evicted model needs to be recovered,
-the manager completes any required VRAM offloading before reconstructing the
-model in system RAM. This avoids a temporary RAM spike at the cost of a slower
-recovery path. Set `conservative=False` to retain the load-first behavior.
+the manager fully evicts every model selected for VRAM offloading before
+reconstructing the target in system RAM. This avoids a temporary RAM spike at
+the cost of a slower recovery path. Set `conservative=False` to retain the
+load-first behavior.
 
 Use `manager.status` for the last pressure snapshot and `on_pressure` for active
 notification:
