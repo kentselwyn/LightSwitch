@@ -62,6 +62,7 @@ manager = MemoryManager(
     vram_reserve_bytes=2 * GiB,
     gpu_index=0,
     poll_interval_seconds=1.0,
+    conservative=True,
 )
 manager.register(
     MyModel(
@@ -79,6 +80,11 @@ with manager:
 Every watcher cycle samples both resources. RAM pressure fully evicts idle
 models in LRU order. VRAM-only pressure leaves them CPU-resident for faster
 recovery. Models currently running inference are never transitioned.
+
+`conservative=True` is the default. When an evicted model needs to be recovered,
+the manager completes any required VRAM offloading before reconstructing the
+model in system RAM. This avoids a temporary RAM spike at the cost of a slower
+recovery path. Set `conservative=False` to retain the load-first behavior.
 
 Use `manager.status` for the last pressure snapshot and `on_pressure` for active
 notification:

@@ -100,6 +100,9 @@ def test_manager_validates_configuration():
     with pytest.raises(ValueError, match="poll_interval_seconds"):
         MemoryManager(0, poll_interval_seconds=0)
 
+    assert MemoryManager(0).conservative is True
+    assert MemoryManager(0, conservative=False).conservative is False
+
 
 def test_register_duplicate_and_lookup_errors():
     manager = make_manager()
@@ -127,6 +130,70 @@ def test_infer_recovers_evicted_model_through_cpu_and_gpu():
     assert model.state is ModelState.GPU_RESIDENT
     assert manager.ram_available == 15
     assert manager.vram_available == 14
+
+
+def test_conservative_recovery_offloads_before_loading_by_default():
+    call_order = []
+
+    class OrderedModel(FakeModel):
+        def _called(self, hook):
+            call_order.append(f"{self.name}:{hook}")
+            super()._called(hook)
+
+    manager = make_manager(vram=2)
+    old = OrderedModel("old", vram=4)
+    target = OrderedModel("target", vram=6)
+    old.mark_gpu_resident()
+    register(manager, old, target)
+
+    manager.infer("target")
+
+    assert call_order == [
+        "old:move_to_cpu",
+        "target:load_to_cpu",
+        "target:move_to_gpu",
+        "target:infer",
+    ]
+
+
+def test_non_conservative_recovery_preserves_load_first_order():
+    call_order = []
+
+    class OrderedModel(FakeModel):
+        def _called(self, hook):
+            call_order.append(f"{self.name}:{hook}")
+            super()._called(hook)
+
+    manager = make_manager(vram=2, conservative=False)
+    old = OrderedModel("old", vram=4)
+    target = OrderedModel("target", vram=6)
+    old.mark_gpu_resident()
+    register(manager, old, target)
+
+    manager.infer("target")
+
+    assert call_order == [
+        "target:load_to_cpu",
+        "old:move_to_cpu",
+        "target:move_to_gpu",
+        "target:infer",
+    ]
+
+
+def test_conservative_recovery_does_not_load_if_offload_fails():
+    manager = make_manager(vram=0)
+    old = FakeModel("old", vram=5)
+    target = FakeModel("target", vram=5)
+    old.mark_gpu_resident()
+    old.fail_on = "move_to_cpu"
+    register(manager, old, target)
+
+    with pytest.raises(ModelTransitionError, match="adapter failure"):
+        manager.infer("target")
+
+    assert old.state is ModelState.GPU_RESIDENT
+    assert target.state is ModelState.EVICTED
+    assert target.calls == []
 
 
 def test_infer_reuses_gpu_resident_model():

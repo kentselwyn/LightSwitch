@@ -101,6 +101,7 @@ class MemoryManager:
         gpu_index: int = 0,
         poll_interval_seconds: float = 1.0,
         on_pressure: Optional[PressureCallback] = None,
+        conservative: bool = True,
     ) -> None:
         if ram_reserve_bytes < 0:
             raise ValueError("ram_reserve_bytes must be non-negative")
@@ -116,6 +117,7 @@ class MemoryManager:
         self.gpu_index = gpu_index
         self.poll_interval_seconds = poll_interval_seconds
         self.on_pressure = on_pressure
+        self.conservative = conservative
         self._models: Dict[str, AIModel] = {}
         self._lock = RLock()
         self._stop_event = Event()
@@ -264,6 +266,10 @@ class MemoryManager:
             with self._lock:
                 model = self.get(name)
                 if model.state is ModelState.EVICTED:
+                    if self.conservative:
+                        self.ensure_vram_available(
+                            model.estimated_vram_bytes, keep_resident=name
+                        )
                     self.ensure_ram_available(
                         model.estimated_ram_bytes, keep_resident=name
                     )
