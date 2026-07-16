@@ -64,6 +64,11 @@ class FakeModel(AIModel):
         self._called("move_to_cpu")
         self.manager.vram_available += self.estimated_vram_bytes
 
+    def evict_from_gpu(self):
+        self._called("evict_from_gpu")
+        self.manager.ram_available += self.estimated_ram_bytes
+        self.manager.vram_available += self.estimated_vram_bytes
+
     def evict_from_cpu(self):
         self._called("evict_from_cpu")
         self.manager.ram_available += self.estimated_ram_bytes
@@ -158,6 +163,31 @@ def test_conservative_recovery_fully_evicts_before_loading_by_default():
     assert old.state is ModelState.EVICTED
 
 
+def test_conservative_recovery_directly_evicts_when_ram_is_scarce():
+    call_order = []
+
+    class OrderedModel(FakeModel):
+        def _called(self, hook):
+            call_order.append(f"{self.name}:{hook}")
+            super()._called(hook)
+
+    manager = make_manager(ram=5, vram=2)
+    old = OrderedModel("old", ram=10, vram=4)
+    target = OrderedModel("target", ram=5, vram=6)
+    old.mark_gpu_resident()
+    register(manager, old, target)
+
+    manager.infer("target")
+
+    assert call_order == [
+        "old:evict_from_gpu",
+        "target:load_to_cpu",
+        "target:move_to_gpu",
+        "target:infer",
+    ]
+    assert old.state is ModelState.EVICTED
+
+
 def test_non_conservative_recovery_preserves_load_first_order():
     call_order = []
 
@@ -215,6 +245,60 @@ def test_conservative_recovery_does_not_load_if_eviction_fails():
     assert target.calls == []
 
 
+def test_conservative_recovery_does_not_load_if_direct_eviction_fails():
+    manager = make_manager(ram=0, vram=0)
+    old = FakeModel("old", ram=5, vram=5)
+    target = FakeModel("target", ram=5, vram=5)
+    old.mark_gpu_resident()
+    old.fail_on = "evict_from_gpu"
+    register(manager, old, target)
+
+    with pytest.raises(ModelTransitionError, match="adapter failure"):
+        manager.infer("target")
+
+    assert old.state is ModelState.GPU_RESIDENT
+    assert old.calls == ["evict_from_gpu"]
+    assert target.state is ModelState.EVICTED
+    assert target.calls == []
+
+
+@pytest.mark.parametrize("resource", ["ram", "vram"])
+def test_conservative_capacity_checks_directly_evict_from_gpu(resource):
+    manager = make_manager(
+        ram=0,
+        vram=0,
+        ram_reserve_bytes=1,
+        vram_reserve_bytes=1,
+    )
+    model = FakeModel("old", ram=5, vram=5)
+    model.mark_gpu_resident()
+    register(manager, model)
+
+    if resource == "ram":
+        manager.ensure_ram_available(1)
+    else:
+        manager.ensure_vram_available(1)
+
+    assert model.calls == ["evict_from_gpu"]
+    assert model.state is ModelState.EVICTED
+
+
+def test_non_conservative_capacity_check_stages_eviction_through_cpu():
+    manager = make_manager(
+        ram=0,
+        ram_reserve_bytes=1,
+        conservative=False,
+    )
+    model = FakeModel("old", ram=5, vram=5)
+    model.mark_gpu_resident()
+    register(manager, model)
+
+    manager.ensure_ram_available(1)
+
+    assert model.calls == ["move_to_cpu", "evict_from_cpu"]
+    assert model.state is ModelState.EVICTED
+
+
 def test_infer_reuses_gpu_resident_model():
     manager = make_manager()
     model = FakeModel("a")
@@ -252,15 +336,16 @@ def test_ram_pressure_fully_evicts_gpu_model_and_requeries():
 
     event = manager.check_pressure()
 
-    assert model.calls == ["move_to_cpu", "evict_from_cpu"]
+    assert model.calls == ["evict_from_gpu"]
     assert model.state is ModelState.EVICTED
-    assert [action.to_state for action in event.actions] == [
-        ModelState.CPU_RESIDENT,
-        ModelState.EVICTED,
+    assert [action.from_state for action in event.actions] == [
+        ModelState.GPU_RESIDENT
     ]
+    assert [action.to_state for action in event.actions] == [ModelState.EVICTED]
+    assert [action.reason for action in event.actions] == ["ram"]
     assert not event.unresolved_ram_pressure
-    assert manager.ram_query_count >= 4
-    assert manager.vram_query_count >= 4
+    assert manager.ram_query_count >= 3
+    assert manager.vram_query_count >= 3
 
 
 def test_simultaneous_pressure_uses_full_eviction_to_resolve_both():
@@ -287,10 +372,10 @@ def test_vram_offload_completes_eviction_if_it_creates_ram_pressure():
     class CPUExpansionModel(FakeModel):
         def move_to_cpu(self):
             super().move_to_cpu()
-            self.manager.ram_available -= 4
+            self.manager.ram_available -= 6
 
     manager = make_manager(
-        ram=3,
+        ram=7,
         vram=0,
         ram_reserve_bytes=2,
         vram_reserve_bytes=5,
@@ -363,6 +448,26 @@ def test_pressure_cycle_continues_after_one_model_transition_fails():
     assert broken.state is ModelState.GPU_RESIDENT
     assert healthy.state is ModelState.CPU_RESIDENT
     assert "adapter failure" in event.error
+    assert not event.unresolved_vram_pressure
+
+
+def test_vram_pressure_directly_evicts_when_ram_query_fails():
+    manager = make_manager(vram=0, vram_reserve_bytes=5)
+    model = FakeModel("old", ram=5, vram=5)
+    model.mark_gpu_resident()
+    register(manager, model)
+
+    def fail_ram_query():
+        raise RAMQueryError("RAM unavailable")
+
+    manager.ram_info = fail_ram_query
+
+    event = manager.check_pressure()
+
+    assert model.calls == ["evict_from_gpu"]
+    assert model.state is ModelState.EVICTED
+    assert [action.reason for action in event.actions] == ["vram"]
+    assert "RAM unavailable" in event.error
     assert not event.unresolved_vram_pressure
 
 

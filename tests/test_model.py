@@ -13,6 +13,9 @@ class DummyModel(AIModel):
     def move_to_cpu(self):
         pass
 
+    def evict_from_gpu(self):
+        pass
+
     def evict_from_cpu(self):
         pass
 

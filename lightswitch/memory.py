@@ -216,6 +216,12 @@ class MemoryManager:
 
             for model in self._ram_candidates(keep_resident):
                 if model.state is ModelState.GPU_RESIDENT:
+                    if self._should_evict_from_gpu(model, available):
+                        self._evict_from_gpu(model)
+                        available = self.ram_info().available_bytes
+                        if available >= target_available:
+                            return
+                        continue
                     self._move_to_cpu(model)
                     available = self.ram_info().available_bytes
                     if available >= target_available:
@@ -260,6 +266,15 @@ class MemoryManager:
                 return
 
             for model in self._vram_candidates(keep_resident):
+                ram_available = (
+                    self.ram_info().available_bytes if self.conservative else None
+                )
+                if self._should_evict_from_gpu(model, ram_available):
+                    self._evict_from_gpu(model)
+                    available = self.vram_info().available_bytes
+                    if available >= target_available:
+                        return
+                    continue
                 self._move_to_cpu(model)
                 if (
                     evict_offloaded
@@ -365,18 +380,37 @@ class MemoryManager:
         if ram_pressure:
             for model in self._ram_candidates():
                 try:
-                    if model.state is ModelState.GPU_RESIDENT:
-                        actions.append(self._move_to_cpu(model, reason="ram"))
+                    available_ram = (
+                        ram_current.available_bytes
+                        if ram_current is not None
+                        else None
+                    )
+                    direct_eviction = (
+                        model.state is ModelState.GPU_RESIDENT
+                        and self._should_evict_from_gpu(model, available_ram)
+                    )
+                    if direct_eviction:
+                        actions.append(
+                            self._evict_from_gpu(model, reason="ram")
+                        )
                         ram_current = self._safe_ram_info(errors)
                         vram_current = self._safe_vram_info(errors)
-                        if (
-                            ram_current is not None
-                            and ram_current.available_bytes >= self.ram_reserve_bytes
-                        ):
-                            break
-                    actions.append(self._evict(model, reason="ram"))
-                    ram_current = self._safe_ram_info(errors)
-                    vram_current = self._safe_vram_info(errors)
+                    else:
+                        if model.state is ModelState.GPU_RESIDENT:
+                            actions.append(
+                                self._move_to_cpu(model, reason="ram")
+                            )
+                            ram_current = self._safe_ram_info(errors)
+                            vram_current = self._safe_vram_info(errors)
+                            if (
+                                ram_current is not None
+                                and ram_current.available_bytes
+                                >= self.ram_reserve_bytes
+                            ):
+                                break
+                        actions.append(self._evict(model, reason="ram"))
+                        ram_current = self._safe_ram_info(errors)
+                        vram_current = self._safe_vram_info(errors)
                 except ModelTransitionError as exc:
                     errors.append(str(exc))
                 if (
@@ -391,16 +425,26 @@ class MemoryManager:
         ):
             for model in self._vram_candidates():
                 try:
-                    actions.append(self._move_to_cpu(model, reason="vram"))
-                    ram_current = self._safe_ram_info(errors)
-                    vram_current = self._safe_vram_info(errors)
-                    if (
-                        ram_current is not None
-                        and ram_current.available_bytes < self.ram_reserve_bytes
-                    ):
-                        actions.append(self._evict(model, reason="ram"))
+                    available_ram = (
+                        ram_current.available_bytes
+                        if ram_current is not None
+                        else None
+                    )
+                    if self._should_evict_from_gpu(model, available_ram):
+                        actions.append(self._evict_from_gpu(model, reason="vram"))
                         ram_current = self._safe_ram_info(errors)
                         vram_current = self._safe_vram_info(errors)
+                    else:
+                        actions.append(self._move_to_cpu(model, reason="vram"))
+                        ram_current = self._safe_ram_info(errors)
+                        vram_current = self._safe_vram_info(errors)
+                        if (
+                            ram_current is not None
+                            and ram_current.available_bytes < self.ram_reserve_bytes
+                        ):
+                            actions.append(self._evict(model, reason="ram"))
+                            ram_current = self._safe_ram_info(errors)
+                            vram_current = self._safe_vram_info(errors)
                 except ModelTransitionError as exc:
                     errors.append(str(exc))
                 if (
@@ -469,6 +513,15 @@ class MemoryManager:
         ]
         return sorted(candidates, key=lambda model: model.last_used_at)
 
+    def _should_evict_from_gpu(
+        self, model: AIModel, available_ram_bytes: Optional[int]
+    ) -> bool:
+        return self.conservative and (
+            available_ram_bytes is None
+            or available_ram_bytes
+            < self.ram_reserve_bytes + model.estimated_ram_bytes
+        )
+
     def _load_to_cpu(self, model: AIModel, reason: str = "recovery") -> MemoryAction:
         source = model.state
         if source is not ModelState.EVICTED:
@@ -507,6 +560,21 @@ class MemoryManager:
             ) from exc
         model.mark_cpu_resident()
         return MemoryAction(model.name, source, ModelState.CPU_RESIDENT, reason)
+
+    def _evict_from_gpu(
+        self, model: AIModel, reason: str = "capacity"
+    ) -> MemoryAction:
+        source = model.state
+        if source is not ModelState.GPU_RESIDENT:
+            raise RuntimeError(f"cannot evict {model.name!r} from {source.value}")
+        try:
+            model.evict_from_gpu()
+        except Exception as exc:
+            raise ModelTransitionError(
+                f"model {model.name!r} failed to evict from GPU: {exc}"
+            ) from exc
+        model.mark_evicted()
+        return MemoryAction(model.name, source, ModelState.EVICTED, reason)
 
     def _evict(self, model: AIModel, reason: str = "capacity") -> MemoryAction:
         source = model.state

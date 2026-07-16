@@ -11,7 +11,7 @@ runs inference without application-side reinitialization.
 ## Model adapters
 
 Subclass `AIModel` and retain the configuration required by `load_to_cpu()` after
-`evict_from_cpu()` deletes the heavyweight runtime object. State changes are
+either eviction hook deletes the heavyweight runtime object. State changes are
 owned by the manager; adapter hooks should not update `model.state` themselves.
 
 ```python
@@ -33,6 +33,10 @@ class MyModel(AIModel):
 
     def move_to_cpu(self):
         self.runtime.to("cpu")
+        framework.release_gpu_cache()
+
+    def evict_from_gpu(self):
+        self.runtime = None
         framework.release_gpu_cache()
 
     def evict_from_cpu(self):
@@ -79,13 +83,19 @@ with manager:
 
 Every watcher cycle samples both resources. RAM pressure fully evicts idle
 models in LRU order. VRAM-only pressure leaves them CPU-resident for faster
-recovery. Models currently running inference are never transitioned.
+recovery when RAM can safely accommodate them. Models currently running
+inference are never transitioned.
 
 `conservative=True` is the default. When an evicted model needs to be recovered,
 the manager fully evicts every model selected for VRAM offloading before
 reconstructing the target in system RAM. This avoids a temporary RAM spike at
 the cost of a slower recovery path. Set `conservative=False` to retain the
 load-first behavior.
+
+Conservative transitions evict a model directly from GPU when available RAM
+cannot accommodate its `estimated_ram_bytes` in addition to the configured RAM
+reserve. This applies to recovery, explicit capacity checks, and background
+pressure handling.
 
 Use `manager.status` for the last pressure snapshot and `on_pressure` for active
 notification:
@@ -111,6 +121,6 @@ supports one NVIDIA GPU per manager.
 ## Migrating from 0.1
 
 The recoverable lifecycle intentionally replaces the former `load()` and
-`offload()` hooks. Add `estimated_ram_bytes`, implement the four residency hooks,
+`offload()` hooks. Add `estimated_ram_bytes`, implement the five residency hooks,
 and replace `VRAMManager` with `MemoryManager`. The initial model state is now
 `ModelState.EVICTED`.

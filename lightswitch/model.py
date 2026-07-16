@@ -73,6 +73,10 @@ class AIModel(ABC):
         """Move a GPU-resident model to system RAM and release its VRAM."""
 
     @abstractmethod
+    def evict_from_gpu(self) -> None:
+        """Release a GPU-resident model without first moving it to CPU."""
+
+    @abstractmethod
     def evict_from_cpu(self) -> None:
         """Release heavyweight CPU resources while retaining recovery data."""
 
