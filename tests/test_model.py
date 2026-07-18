@@ -34,6 +34,9 @@ def make_model(**overrides):
 
 
 def test_model_validates_configuration():
+    assert make_model().always_evict_from_gpu is False
+    assert make_model(always_evict_from_gpu=True).always_evict_from_gpu is True
+
     with pytest.raises(ValueError, match="name"):
         make_model(name="")
     with pytest.raises(ValueError, match="estimated_ram_bytes"):

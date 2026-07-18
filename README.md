@@ -16,11 +16,19 @@ owned by the manager; adapter hooks should not update `model.state` themselves.
 
 ```python
 class MyModel(AIModel):
-    def __init__(self, name, model_id, estimated_ram_bytes, estimated_vram_bytes):
+    def __init__(
+        self,
+        name,
+        model_id,
+        estimated_ram_bytes,
+        estimated_vram_bytes,
+        always_evict_from_gpu=False,
+    ):
         super().__init__(
             name=name,
             estimated_ram_bytes=estimated_ram_bytes,
             estimated_vram_bytes=estimated_vram_bytes,
+            always_evict_from_gpu=always_evict_from_gpu,
         )
         self.model_id = model_id
         self.runtime = None
@@ -49,7 +57,10 @@ class MyModel(AIModel):
 
 `estimated_ram_bytes` should conservatively cover the model's system RAM
 footprint in either resident state. `estimated_vram_bytes` should cover its GPU
-allocation.
+allocation. Set `always_evict_from_gpu=True` for a model that should call
+`evict_from_gpu()` and become fully evicted whenever it is selected for removal
+from the GPU, instead of moving it to system RAM. Its lightweight recovery
+recipe remains registered.
 
 ## Memory management
 
@@ -83,8 +94,9 @@ with manager:
 
 Every watcher cycle samples both resources. RAM pressure fully evicts idle
 models in LRU order. VRAM-only pressure leaves them CPU-resident for faster
-recovery when RAM can safely accommodate them. Models currently running
-inference are never transitioned.
+recovery when RAM can safely accommodate them, unless the model has
+`always_evict_from_gpu=True`. Models currently running inference are never
+transitioned.
 
 `conservative=True` is the default. When an evicted model needs to be recovered,
 the manager fully evicts every model selected for VRAM offloading before

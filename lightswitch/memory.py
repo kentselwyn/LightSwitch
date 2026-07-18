@@ -516,10 +516,13 @@ class MemoryManager:
     def _should_evict_from_gpu(
         self, model: AIModel, available_ram_bytes: Optional[int]
     ) -> bool:
-        return self.conservative and (
-            available_ram_bytes is None
-            or available_ram_bytes
-            < self.ram_reserve_bytes + model.estimated_ram_bytes
+        return model.always_evict_from_gpu or (
+            self.conservative
+            and (
+                available_ram_bytes is None
+                or available_ram_bytes
+                < self.ram_reserve_bytes + model.estimated_ram_bytes
+            )
         )
 
     def _load_to_cpu(self, model: AIModel, reason: str = "recovery") -> MemoryAction:

@@ -36,11 +36,14 @@ class StaticMemoryManager(MemoryManager):
 
 
 class FakeModel(AIModel):
-    def __init__(self, name, ram=10, vram=5, result=None):
+    def __init__(
+        self, name, ram=10, vram=5, result=None, always_evict_from_gpu=False
+    ):
         super().__init__(
             name=name,
             estimated_ram_bytes=ram,
             estimated_vram_bytes=vram,
+            always_evict_from_gpu=always_evict_from_gpu,
         )
         self.result = name if result is None else result
         self.manager = None
@@ -326,6 +329,40 @@ def test_vram_capacity_offloads_least_recently_used_model():
     assert old.calls == ["move_to_cpu"]
     assert newer.state is ModelState.GPU_RESIDENT
     assert target.state is ModelState.GPU_RESIDENT
+
+
+def test_model_flag_directly_evicts_for_vram_capacity():
+    manager = make_manager(vram=0, conservative=False)
+    model = FakeModel("old", vram=5, always_evict_from_gpu=True)
+    model.mark_gpu_resident()
+    register(manager, model)
+
+    manager.ensure_vram_available(1)
+
+    assert model.calls == ["evict_from_gpu"]
+    assert model.state is ModelState.EVICTED
+
+
+def test_model_flag_directly_evicts_during_vram_pressure_check():
+    manager = make_manager(
+        vram=0,
+        vram_reserve_bytes=5,
+        conservative=False,
+    )
+    model = FakeModel("old", vram=5, always_evict_from_gpu=True)
+    model.mark_gpu_resident()
+    register(manager, model)
+
+    event = manager.check_pressure()
+
+    assert model.calls == ["evict_from_gpu"]
+    assert model.state is ModelState.EVICTED
+    assert [action.from_state for action in event.actions] == [
+        ModelState.GPU_RESIDENT
+    ]
+    assert [action.to_state for action in event.actions] == [ModelState.EVICTED]
+    assert [action.reason for action in event.actions] == ["vram"]
+    assert not event.unresolved_vram_pressure
 
 
 def test_ram_pressure_fully_evicts_gpu_model_and_requeries():

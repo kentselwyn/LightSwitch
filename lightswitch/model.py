@@ -32,6 +32,7 @@ class AIModel(ABC):
     name: str
     estimated_ram_bytes: int
     estimated_vram_bytes: int
+    always_evict_from_gpu: bool = False
     state: ModelState = field(default=ModelState.EVICTED, init=False)
     last_used_at: float = field(default=0.0, init=False)
 
